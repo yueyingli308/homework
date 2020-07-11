@@ -1,0 +1,147 @@
+javaaddpath java/jdbc.jar
+setenv('PATH', [getenv('PATH') ':/Users/yuhuayu/q/m64']);
+system('q -p 5001 &');
+cKDB = kx('localhost',5001);
+% Load the 6 Column KDB+ Database
+exec(cKDB,'load `ieorNum6'); 
+
+% Strategic Allocation
+tSA = array2table({ ...
+    'Bonds'       ,0.30,0.05,'LBUSTRUU Index' ,'BB US AGGREGATE TOTAL RETURN VALUE UNHEDGED USD'; ...
+    'HY Bonds'    ,0.05,0.05,'LF98TRUU Index' ,'US CORPORATE HIGH YIELD INDEX'; ...
+    'Commodities' ,0.05,0.02,'SPGCCITR Index' ,'S&P GSCI OFFICIAL CLOSE INDEX'; ...
+    'EM Equities' ,0.10,0.05,'M2EF Index'     ,'MSCI EM USD GROSS TOTAL RETURN INDEX'; ...
+    'DM Equities' ,0.10,0.05,'VTMGX US Equity','VANGUARD DEV MKT INDX-ADM'; ...
+    'US Lg Growth',0.20,0.05,'MLGUUSAG Index' ,'MSCI USA LARGE GROWTH US'; ...
+    'US Lg Value' ,0.10,0.05,'MLVUU SAG Index','MSCI USA LARGE VALUE USD'; ...
+    'US Small Cap',0.10,0.05,'M2USSC Index'   ,'MSCI USA SMALL CAP INDEX'}, ...
+    'VariableNames',{'CLASS','VALUE','BAND'   ,'TICKER','NAME'});
+tSA = convertvars(tSA,{'CLASS','TICKER','NAME'},'categorical');
+tSA.VALUE = cell2mat(tSA.VALUE);
+tSA.BAND = cell2mat(tSA.BAND);
+writetable(tSA,'tSA.csv')
+
+pie(tSA.VALUE,cellstr(tSA.CLASS));
+title('Strategic Asset Allocation');
+
+
+
+% Assemble All Investable Data in tDAR for all teams
+
+str = ['select from ieorNum6 where FIELD=`DAY_TO_DAY_TOT_RETURN_GROSS_DVDS,' ...
+      'TICKER in`$(' sprintf('"%s";',tSA.TICKER)];
+tDAR = struct2table(fetch(cKDB,[str(1:end-1) ')']));
+tDAR.ODATE = datetime(datestr(tDAR.ODATE));
+tDAR = convertvars(tDAR,{'TICKER','FIELD'},'categorical');
+tDAR.VALUE = tDAR.VALUE./100;tDAR(isempty(tDAR.VALUE)|isnan(tDAR.VALUE)|isinf(tDAR.VALUE),:) = [];
+tDAR = tDAR(:,{'ODATE','TICKER','VALUE'}); % REMOVE FIELD, SDATE AND EDATE
+tDAR = unstack(tDAR,'VALUE','TICKER');     % PIVOT
+tDAR = sortrows(tDAR,'ODATE');
+writetable(tDAR,'tDAR.csv');
+
+% Assemble All Signals in tSIG for all teams
+sCol = {'Equity_vs_Bonds',...                           % HUAYU YU
+    'HY_vs_US_Stocks', ...                              % MALIN ORTENBLAD
+    'Commodities_vs_Stock',...                          % Niranjana Moleyar
+    'LgGrowth_vs_LgValue',...                           % YUXUAN MAO
+    'EMEquity_vs_DMEquity', ...                         % GYEOM KIM
+    'EMEquity_vs_USEquity', 'DMEquity_vs_USEquity', ...  % MAOKUN HE    
+    };                                     
+tSIG = tDAR(:,{'ODATE'});
+for i = 1:length(sCol)
+    t = readtable([sCol{i} '.csv']);
+    t = convertvars(t,t.Properties.VariableNames{2},'categorical');
+    tSIG = outerjoin(tSIG,t,'MergeKeys',true);
+end
+tSIG = tSIG(4801:14124,:);
+writetable(tSIG,'tSIG.csv');
+
+
+% Express tSIG in tALLOC for all teams
+tALLOC = [tSIG(:,{'ODATE'}), array2table( ...
+    repmat(tSA.VALUE.',height(tSIG),1),'VariableNames', ...
+    cellstr(tSA.TICKER).') ];
+
+
+for i=1:height(tALLOC)
+    % < DECISION LOGIC >
+    if tSIG(i,:).(2) == 'Buy'
+         weight_bonds = tSA(1,:).VALUE - 0.5 * tSA(1,:).BAND;
+    elseif tSIG(i,:).(2) == 'Sell'
+        weight_bonds = tSA(1,:).VALUE + 0.5 * tSA(1,:).BAND;
+    else
+        weight_bonds = tSA(1,:).VALUE;
+    end
+    
+    if tSIG(i,:).(3) == 'Buy'
+         weight_HYbonds = tSA(2,:).VALUE - 0.5 * tSA(2,:).BAND;
+    elseif tSIG(i,:).(3) == 'Sell'
+        weight_HYbonds = tSA(2,:).VALUE + 0.5 * tSA(2,:).BAND;
+    else
+        weight_HYbonds = tSA(2,:).VALUE;
+    end
+    
+    if tSIG(i,:).(4) == 'Buy'
+         weight_commodities = tSA(3,:).VALUE - 0.5 * tSA(3,:).BAND;
+    elseif tSIG(i,:).(4) == 'Sell'
+        weight_commodities = tSA(3,:).VALUE + 0.5 * tSA(3,:).BAND;
+    else
+        weight_commodities = tSA(3,:).VALUE;
+    end
+    
+    weight_totalequities = 1 - weight_bonds -  weight_HYbonds - weight_commodities;
+    
+    weight_LgGrowth_LgValue = 0.5 * weight_totalequities;
+    
+    if tSIG(i,:).(5) == 'Buy'
+         weight_LgGrowth = 2/3 * weight_LgGrowth_LgValue + 0.01;
+    elseif tSIG(i,:).(5) == 'Sell'
+        weight_LgGrowth = 2/3 * weight_LgGrowth_LgValue - 0.01;
+    else
+        weight_LgGrowth = 2/3 * weight_LgGrowth_LgValue;
+    end
+    
+    weight_LgValue = weight_LgGrowth_LgValue - weight_LgGrowth;
+    
+    weight_EM_DM_US = 0.5 * weight_totalequities;
+    
+    if tSIG(i,:).(6) == 'Buy'
+        if tSIG(i,:).(7) == 'Buy'
+            weight_EM = 1/3 * weight_EM_DM_US + 0.01;
+            weight_US = 1/3 * weight_EM_DM_US;
+        elseif tSIG(i,:).(7) == 'Sell'
+            weight_EM = 1/3 * weight_EM_DM_US;
+            weight_US = 1/3 * weight_EM_DM_US + 0.01;
+        else
+            weight_EM = 1/3 * weight_EM_DM_US + 0.005;
+            weight_US = 1/3 * weight_EM_DM_US + 0.005;
+        end
+    elseif tSIG(i,:).(6) == 'Sell'
+        if tSIG(i,:).(8) == 'Buy'
+            weight_EM = 1/3 * weight_EM_DM_US - 0.01;
+            weight_US = 1/3 * weight_EM_DM_US;
+        elseif tSIG(i,:).(8) == 'Sell'
+            weight_EM = 1/3 * weight_EM_DM_US;
+            weight_US = 1/3 * weight_EM_DM_US - 0.01;
+        else
+            weight_EM = 1/3 * weight_EM_DM_US - 0.005;
+            weight_US = 1/3 * weight_EM_DM_US - 0.005;
+        end
+    else
+         weight_EM = 1/3 * weight_EM_DM_US;
+         weight_US = 1/3 * weight_EM_DM_US;
+    end
+    
+    weight_DM = weight_EM_DM_US - weight_EM - weight_US;
+    
+    tALLOC(i,:).(2) =  weight_bonds;
+    tALLOC(i,:).(3) = weight_HYbonds;
+    tALLOC(i,:).(4) = weight_commodities;
+    tALLOC(i,:).(5) = weight_EM;
+    tALLOC(i,:).(6) = weight_DM;
+    tALLOC(i,:).(7) = weight_LgGrowth;
+    tALLOC(i,:).(8) = weight_LgValue;
+    tALLOC(i,:).(9) = weight_US;
+                        
+end
+writetable(tALLOC,'tALLOC.csv');
